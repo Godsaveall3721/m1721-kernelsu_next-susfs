@@ -594,7 +594,7 @@ static void ksu_run_ksud_post_fs_work(struct work_struct *work)
 	if (!info) {
 		ret = -ENOMEM;
 	} else {
-		ret = call_usermodehelper_exec(info, UMH_WAIT_EXEC);
+		ret = call_usermodehelper_exec(info, UMH_WAIT_PROC);
 	}
 	pr_info("ksud post-fs-data fallback: attempt=%u ret=%d\n",
 		attempts, ret);
@@ -1272,40 +1272,114 @@ unshare: Unknown option 'propagation'
 ```
 
 因此 `vectord` 不会启动。使用 KernelSU 自带 busybox，并用 `setsid`
-让 daemon 脱离模块 service 阶段的父进程。完整文件位于：
+让 daemon 脱离模块启动脚本的父进程。完整文件位于：
 
 ```text
+fixes/zygisk-vector/post-fs-data.sh
 fixes/zygisk-vector/service.sh
 ```
 
 安装或更新 Vector 后执行：
 
 ```bash
+adb push fixes/zygisk-vector/post-fs-data.sh /data/local/tmp/vector-post-fs-data.sh
 adb push fixes/zygisk-vector/service.sh /data/local/tmp/vector-service.sh
 adb shell "su -c '
 MOD=/data/adb/modules/zygisk_vector
+cp -a \"\$MOD/post-fs-data.sh\" \"\$MOD/post-fs-data.sh.orig-m1721\" 2>/dev/null || true
 cp -a \"\$MOD/service.sh\" \"\$MOD/service.sh.orig-m1721\"
+cp /data/local/tmp/vector-post-fs-data.sh \"\$MOD/post-fs-data.sh\"
 cp /data/local/tmp/vector-service.sh \"\$MOD/service.sh\"
-chmod 755 \"\$MOD/service.sh\"
+chmod 755 \"\$MOD/post-fs-data.sh\" \"\$MOD/service.sh\"
 '"
 ```
 
 重新安装 Vector 会覆盖这个文件，需要再次执行上述命令。
+
+`vectord` 必须与最初的 `system_server` 同时启动。若等 Android 启动完成
+后再启动，Vector 只能重启 `system_server` 补注入，本机会因此关闭 USB
+调试。因此使用 `post-fs-data.sh` 提前启动；`service.sh` 检测到已有
+`vectord` 时会直接退出，避免重复启动。
 
 ### 11.2 KernelSU service 阶段兜底
 
 本机 init 在解析 KernelSU 追加的 init.rc 前已经将
 `vold.decrypt` 设为 `trigger_restart_framework`，导致原有的
 `services` 触发分支没有执行。表现是模块 `service.sh` 全部不运行。
+同时把 `sys.boot_completed` 分支加入 init.rc 也不够：厂商策略拒绝了
+`init -> ksu` 的 bounded transition。
 
-在 `KernelSU-Next/kernel/runtime/ksud_integration.c` 的
-`KERNEL_SU_RC` 中，为 `sys.boot_completed=1` 增加兜底：
+因此在 `KernelSU-Next/kernel/runtime/boot_event.c` 中，用已经验证可用的
+usermodehelper 在 post-fs-data 后延迟 25 秒执行模块 service 阶段：
 
 ```c
-"on property:sys.boot_completed=1\n"
-"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
-"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
+static void ksu_run_ksud_services_work(struct work_struct *work)
+{
+	char *argv[] = { (char *)KSUD_PATH, "services", NULL };
+	char *envp[] = {
+		"HOME=/",
+		"PATH=/sbin:/system/sbin:/system/bin:/system/xbin",
+		NULL
+	};
+	struct subprocess_info *info;
+	int ret;
+
+	info = call_usermodehelper_setup(argv[0], argv, envp, GFP_KERNEL,
+					 ksu_ksud_umh_init, NULL, NULL);
+	if (!info) {
+		ret = -ENOMEM;
+	} else {
+		ret = call_usermodehelper_exec(info, UMH_WAIT_PROC);
+	}
+	pr_info("ksud services fallback: ret=%d\n", ret);
+}
+
+schedule_delayed_work(&ksu_run_ksud_services_work_item,
+		      msecs_to_jiffies(25000));
 ```
+
+本机还可能遇到 Zygisk daemon 已 Hook init，但第一次 Zygote `execve`
+已经进入内核，导致 `zygiskd status` 显示 `zygote_states:0`。此时 daemon
+没有失效，只需在 Hook 已安装后再重启一次 Zygote。使用：
+
+```text
+fixes/zygisk-next/service.sh
+```
+
+关键逻辑：
+
+```sh
+if "$MODDIR/bin/zygiskd" status 2>/dev/null |
+    grep -q '^zygote_states:0$'; then
+  setprop ctl.restart zygote
+  exit 0
+fi
+```
+
+安装或更新 Zygisk Next 后执行：
+
+```bash
+adb push fixes/zygisk-next/service.sh /data/local/tmp/zygisk-next-service.sh
+adb shell "su -c '
+MOD=/data/adb/modules/zygisksu
+cp -a \"\$MOD/service.sh\" \"\$MOD/service.sh.orig-m1721\"
+cp /data/local/tmp/zygisk-next-service.sh \"\$MOD/service.sh\"
+chmod 755 \"\$MOD/service.sh\"
+'"
+```
+
+该内核上 `persist.sys.usb.config` 可能被厂商设为 `none`，SystemServer
+重启时会导致 ADB 消失。需要 ADB 调试时设为：
+
+```bash
+adb shell "su -c '
+settings put global development_settings_enabled 1
+settings put global adb_enabled 1
+setprop persist.sys.usb.config mtp,adb
+'"
+```
+
+之后 Zygote 重启会重新枚举 USB，但不会再关闭 USB 调试。
 
 临时验证模块 service 阶段可执行：
 
@@ -1351,6 +1425,10 @@ ksu_allow(db, "system_server", "system_file", "file", "open");
 ksu_allow(db, "system_server", "system_file", "file", "read");
 ksu_allow(db, "system_server", "system_file", "file", "getattr");
 ksu_allow(db, "system_server", "system_file", "file", "map");
+
+ksu_allow(db, "dex2oat", "dex2oat_exec", "file", "execute");
+ksu_allow(db, "dex2oat", "dex2oat_exec", "file", "execute_no_trans");
+ksu_allow(db, "dex2oat", "system_linker_exec", "file", "execute_no_trans");
 ```
 
 修改后必须按第 7、8 节重新编译并刷入 boot。

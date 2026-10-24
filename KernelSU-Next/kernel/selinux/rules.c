@@ -176,6 +176,12 @@ static int apply_kernelsu_rules_fn(void *ptr)
     ksu_allow(db, "system_server", "system_file", "file", "getattr");
     ksu_allow(db, "system_server", "system_file", "file", "map");
 
+    // Vector checks this exact permission before enabling its dex2oat wrapper.
+    // Runtime policy patching is unreliable on this vendor 4.9 kernel, so seed it at boot.
+    ksu_allow(db, "dex2oat", "dex2oat_exec", "file", "execute");
+    ksu_allow(db, "dex2oat", "dex2oat_exec", "file", "execute_no_trans");
+    ksu_allow(db, "dex2oat", "system_linker_exec", "file", "execute_no_trans");
+
     // we need to umount modules in zygote
     ksu_allow(db, "zygote", "adb_data_file", "dir", "search");
 

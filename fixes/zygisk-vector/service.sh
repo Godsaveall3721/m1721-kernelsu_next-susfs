@@ -3,6 +3,10 @@
 MODDIR="${0%/*}"
 cd "$MODDIR" || exit 1
 
+if pidof vectord >/dev/null 2>&1; then
+    exit 0
+fi
+
 # Android 11's toybox unshare has no --propagation option. Use KernelSU's
 # busybox implementation so mounting the resource-cache tmpfs cannot propagate
 # back into the parent mount namespace.
