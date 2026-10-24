@@ -1243,3 +1243,170 @@ SHA-256: 5354fd9106fc65e46e70fdf0ba5acfc678dfdd7b5feccba13584708e98299164
 `susfs4ksu` 模块默认的隐藏命令都放在 `post-fs-data.sh` 中未执行
 的 heredoc 示例里。内核支持已激活，但具体隐藏哪些路径/挂载，
 仍需按实际需求启用对应 `ksu_susfs` 命令。
+
+## 11. 可选：Zygisk Next 与 Vector
+
+本节只适用于使用 Zygisk/Xposed 的情况，与 SUSFS 相互独立。只使用
+KernelSU-Next 或只使用 SUSFS 时可以跳过。
+
+本机实测的运行顺序是：
+
+1. 安装 Zygisk Next。
+2. 安装 Vector。
+3. 确认 `zygiskd` 已经加载 Vector 的 32/64 位库。
+4. 启动 `vectord`，由它向 `system_server` 注入 Vector 框架。
+5. 从 KernelSU Manager 点击 Vector 的“执行”打开寄生 Manager。
+
+### 11.1 Android 11 的 unshare 兼容
+
+Vector 2.2 的 `service.sh` 使用：
+
+```sh
+unshare --propagation slave -m ...
+```
+
+本机 Android 11 的 toybox `unshare` 不支持 `--propagation`，会直接报：
+
+```text
+unshare: Unknown option 'propagation'
+```
+
+因此 `vectord` 不会启动。使用 KernelSU 自带 busybox，并用 `setsid`
+让 daemon 脱离模块 service 阶段的父进程。完整文件位于：
+
+```text
+fixes/zygisk-vector/service.sh
+```
+
+安装或更新 Vector 后执行：
+
+```bash
+adb push fixes/zygisk-vector/service.sh /data/local/tmp/vector-service.sh
+adb shell "su -c '
+MOD=/data/adb/modules/zygisk_vector
+cp -a \"\$MOD/service.sh\" \"\$MOD/service.sh.orig-m1721\"
+cp /data/local/tmp/vector-service.sh \"\$MOD/service.sh\"
+chmod 755 \"\$MOD/service.sh\"
+'"
+```
+
+重新安装 Vector 会覆盖这个文件，需要再次执行上述命令。
+
+### 11.2 KernelSU service 阶段兜底
+
+本机 init 在解析 KernelSU 追加的 init.rc 前已经将
+`vold.decrypt` 设为 `trigger_restart_framework`，导致原有的
+`services` 触发分支没有执行。表现是模块 `service.sh` 全部不运行。
+
+在 `KernelSU-Next/kernel/runtime/ksud_integration.c` 的
+`KERNEL_SU_RC` 中，为 `sys.boot_completed=1` 增加兜底：
+
+```c
+"on property:sys.boot_completed=1\n"
+"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
+"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
+```
+
+临时验证模块 service 阶段可执行：
+
+```bash
+adb shell "su -c '/data/adb/ksud services'"
+```
+
+### 11.3 Vector 和 system_server 的 SELinux 权限
+
+本机 `system_server` 的 `execmem` 请求曾被拒绝：
+
+```text
+avc: denied { execmem } for comm="system_server"
+scontext=u:r:system_server:s0 tcontext=u:r:system_server:s0
+tclass=process permissive=0
+```
+
+随后 Vector 注入触发系统服务崩溃。模块自己的 `sepolicy.rule` 在早期
+启动阶段未能生效，因此在
+`KernelSU-Next/kernel/selinux/rules.c` 的内置规则中增加：
+
+```c
+ksu_allow(db, "zygote", "zygote", "process", "execmem");
+ksu_allow(db, "system_server", "system_server", "process", "execmem");
+
+ksu_allow(db, "zygote", "unlabeled", "file", ALL);
+ksu_allow(db, "zygote", "nsfs", "file", "open");
+ksu_allow(db, "zygote", "nsfs", "file", "read");
+ksu_allow(db, "zygote", "zygote", "capability", "sys_chroot");
+ksu_allow(db, "zygote", "fs_type", "filesystem", "unmount");
+
+ksu_allow(db, "shell", "adb_data_file", "dir", "search");
+ksu_allow(db, "shell", "adb_data_file", "dir", "open");
+ksu_allow(db, "shell", "adb_data_file", "dir", "read");
+ksu_allow(db, "shell", "adb_data_file", "dir", "getattr");
+ksu_allow(db, "shell", "system_file", "file", "open");
+ksu_allow(db, "shell", "system_file", "file", "read");
+ksu_allow(db, "shell", "system_file", "file", "getattr");
+ksu_allow(db, "shell", "system_file", "file", "map");
+ksu_allow(db, "shell", "shell", "dir", "write");
+ksu_allow(db, "system_server", "adb_data_file", "dir", "search");
+ksu_allow(db, "system_server", "system_file", "file", "open");
+ksu_allow(db, "system_server", "system_file", "file", "read");
+ksu_allow(db, "system_server", "system_file", "file", "getattr");
+ksu_allow(db, "system_server", "system_file", "file", "map");
+```
+
+修改后必须按第 7、8 节重新编译并刷入 boot。
+
+### 11.4 验证
+
+先确认 Zygisk Next 已加载 Vector 的两种 ABI：
+
+```bash
+adb shell "su -c '
+/data/adb/modules/zygisksu/bin/zygiskd status
+ps -A -o PID,USER,NAME,ARGS | grep -E \"zn-daemon|vectord\"
+'"
+```
+
+关键结果：
+
+```text
+inject_state:1
+modules64:3,...,zygisk_vector
+modules32:3,...,zygisk_vector
+modules_with_issue:0
+```
+
+Vector 注入成功时，logcat 必须出现：
+
+```text
+Injected Vector framework into system_server.
+Successfully injected Vector IPC binder for applications.
+```
+
+并确认用户存储已经解锁，否则 Manager 会因
+`SharedPreferences in credential encrypted storage` 退出：
+
+```bash
+adb shell 'dumpsys user | grep -m1 "State:"'
+```
+
+输出必须是：
+
+```text
+State: RUNNING_UNLOCKED
+```
+
+最后执行 Manager：
+
+```bash
+adb shell "su -c '/data/adb/ksud module action zygisk_vector'"
+adb shell "dumpsys activity activities | grep -E 'mResumedActivity|MainActivity'"
+```
+
+应看到：
+
+```text
+com.android.shell/org.matrix.vector.manager.ui.MainActivity
+```
+
+若仍失败，先检查 `dmesg` 中是否还有新的 `execmem` 或
+`manager.apk` SELinux 拒绝，再检查 `vectord` 是否运行。

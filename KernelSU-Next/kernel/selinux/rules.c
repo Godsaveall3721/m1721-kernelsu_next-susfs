@@ -146,6 +146,36 @@ static int apply_kernelsu_rules_fn(void *ptr)
     ksu_allow(db, "kernel", "system_file", "dir", ALL);
     ksu_allow(db, "kernel", "system_file", "file", ALL);
     ksu_allow(db, "kernel", "system_file", "lnk_file", ALL);
+
+    // Zygisk Next and Vector allocate executable anonymous memory in zygote/system_server.
+    // Module sepolicy is applied later on this 4.9 kernel, so keep the required grants in
+    // KernelSU's built-in policy where they are available before Zygisk starts.
+    ksu_allow(db, "zygote", "zygote", "process", "execmem");
+    ksu_allow(db, "system_server", "system_server", "process", "execmem");
+
+    // Zygisk Next crosses these namespaces and accesses its unlabeled unshare lock.
+    ksu_allow(db, "zygote", "unlabeled", "file", ALL);
+    ksu_allow(db, "zygote", "nsfs", "file", "open");
+    ksu_allow(db, "zygote", "nsfs", "file", "read");
+    ksu_allow(db, "zygote", "zygote", "capability", "sys_chroot");
+    ksu_allow(db, "zygote", "fs_type", "filesystem", "unmount");
+
+    // Vector's parasitic manager needs to open its APK from /data/adb/modules.
+    ksu_allow(db, "shell", "adb_data_file", "dir", "search");
+    ksu_allow(db, "shell", "adb_data_file", "dir", "open");
+    ksu_allow(db, "shell", "adb_data_file", "dir", "read");
+    ksu_allow(db, "shell", "adb_data_file", "dir", "getattr");
+    ksu_allow(db, "shell", "system_file", "file", "open");
+    ksu_allow(db, "shell", "system_file", "file", "read");
+    ksu_allow(db, "shell", "system_file", "file", "getattr");
+    ksu_allow(db, "shell", "system_file", "file", "map");
+    ksu_allow(db, "shell", "shell", "dir", "write");
+    ksu_allow(db, "system_server", "adb_data_file", "dir", "search");
+    ksu_allow(db, "system_server", "system_file", "file", "open");
+    ksu_allow(db, "system_server", "system_file", "file", "read");
+    ksu_allow(db, "system_server", "system_file", "file", "getattr");
+    ksu_allow(db, "system_server", "system_file", "file", "map");
+
     // we need to umount modules in zygote
     ksu_allow(db, "zygote", "adb_data_file", "dir", "search");
 
