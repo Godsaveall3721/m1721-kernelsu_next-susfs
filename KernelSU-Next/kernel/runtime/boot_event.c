@@ -79,6 +79,34 @@ static void ksu_run_ksud_services_work(struct work_struct *work)
 static DECLARE_DELAYED_WORK(ksu_run_ksud_services_work_item,
 			    ksu_run_ksud_services_work);
 
+static void ksu_run_vectord_work(struct work_struct *work)
+{
+	char *argv[] = {
+		"/system/bin/sh",
+		"/data/adb/modules/zygisk_vector/run-vectord.sh",
+		NULL
+	};
+	char *envp[] = {
+		"HOME=/",
+		"PATH=/sbin:/system/sbin:/system/bin:/system/xbin",
+		NULL
+	};
+	struct subprocess_info *info;
+	int ret;
+
+	info = call_usermodehelper_setup(argv[0], argv, envp, GFP_KERNEL,
+					 ksu_ksud_umh_init, NULL, NULL);
+	if (!info) {
+		ret = -ENOMEM;
+	} else {
+		ret = call_usermodehelper_exec(info, UMH_WAIT_EXEC);
+	}
+	pr_info("vectord fallback: ret=%d\n", ret);
+}
+
+static DECLARE_DELAYED_WORK(ksu_run_vectord_work_item,
+			    ksu_run_vectord_work);
+
 void on_post_fs_data(void)
 {
 	static bool done = false;
@@ -100,6 +128,7 @@ void on_post_fs_data(void)
 	// and refuses init-to-ksu transitions. Start module services through UMH instead.
 	schedule_delayed_work(&ksu_run_ksud_services_work_item,
 			      msecs_to_jiffies(25000));
+	schedule_delayed_work(&ksu_run_vectord_work_item, 0);
 }
 
 extern void ext4_unregister_sysfs(struct super_block *sb);

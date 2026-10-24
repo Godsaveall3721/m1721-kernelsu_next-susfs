@@ -1275,31 +1275,47 @@ unshare: Unknown option 'propagation'
 让 daemon 脱离模块启动脚本的父进程。完整文件位于：
 
 ```text
+fixes/zygisk-vector/action.sh
 fixes/zygisk-vector/post-fs-data.sh
+fixes/zygisk-vector/run-vectord.sh
 fixes/zygisk-vector/service.sh
 ```
 
 安装或更新 Vector 后执行：
 
 ```bash
+adb push fixes/zygisk-vector/action.sh /data/local/tmp/vector-action.sh
 adb push fixes/zygisk-vector/post-fs-data.sh /data/local/tmp/vector-post-fs-data.sh
+adb push fixes/zygisk-vector/run-vectord.sh /data/local/tmp/run-vectord.sh
 adb push fixes/zygisk-vector/service.sh /data/local/tmp/vector-service.sh
 adb shell "su -c '
 MOD=/data/adb/modules/zygisk_vector
+cp -a \"\$MOD/action.sh\" \"\$MOD/action.sh.orig-m1721\" 2>/dev/null || true
 cp -a \"\$MOD/post-fs-data.sh\" \"\$MOD/post-fs-data.sh.orig-m1721\" 2>/dev/null || true
 cp -a \"\$MOD/service.sh\" \"\$MOD/service.sh.orig-m1721\"
+cp /data/local/tmp/vector-action.sh \"\$MOD/action.sh\"
 cp /data/local/tmp/vector-post-fs-data.sh \"\$MOD/post-fs-data.sh\"
+cp /data/local/tmp/run-vectord.sh \"\$MOD/run-vectord.sh\"
 cp /data/local/tmp/vector-service.sh \"\$MOD/service.sh\"
-chmod 755 \"\$MOD/post-fs-data.sh\" \"\$MOD/service.sh\"
+chmod 755 \"\$MOD/action.sh\" \"\$MOD/post-fs-data.sh\" \
+  \"\$MOD/run-vectord.sh\" \"\$MOD/service.sh\"
 '"
 ```
 
 重新安装 Vector 会覆盖这个文件，需要再次执行上述命令。
 
-`vectord` 必须与最初的 `system_server` 同时启动。若等 Android 启动完成
-后再启动，Vector 只能重启 `system_server` 补注入，本机会因此关闭 USB
-调试。因此使用 `post-fs-data.sh` 提前启动；`service.sh` 检测到已有
-`vectord` 时会直接退出，避免重复启动。
+本机 `ksud` 的临时子进程会在 service 阶段结束时被回收，因此不能只
+依赖 `post-fs-data.sh` 或 `service.sh` 的后台进程。最终可靠入口是
+`action.sh`：
+
+1. 点击 Vector 的“执行”。
+2. 如果 `vectord` 不存在，脚本启动 `run-vectord.sh`。
+3. 等待约 30 秒完成 system_server 补注入。
+4. 打开寄生 Manager。
+5. action 进程保持运行并托管 daemon，不能立即退出。
+
+重启后第一次点击“执行”会等待约 30 秒，这是正常现象。`post-fs-data.sh`
+和 `service.sh` 仍保留为提前启动尝试；检测到已有 `vectord` 时直接退出。
 
 ### 11.2 KernelSU service 阶段兜底
 
