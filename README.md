@@ -1,6 +1,6 @@
 
 Meizu m1721（Linux 4.9.330）上集成 KernelSU-Next SUSFS 的方案。
-
+适配 gitee.com/curtis-ly/LineageOS-M6Note
 
 
 ## 1. 测试环境
@@ -1340,31 +1340,36 @@ schedule_delayed_work(&ksu_run_ksud_services_work_item,
 
 本机还可能遇到 Zygisk daemon 已 Hook init，但第一次 Zygote `execve`
 已经进入内核，导致 `zygiskd status` 显示 `zygote_states:0`。此时 daemon
-没有失效，只需在 Hook 已安装后再重启一次 Zygote。使用：
+没有失效，只需在 Hook 已安装后再重启一次 Zygote。
+
+Zygisk Next 1.5.2 的许可证禁止修改和再分发模块文件，因此不能直接改
+`modules/zygisksu/service.sh`；这样做还会触发 `Module files corrupted`。
+本方案保持 Zygisk Next 官方 ZIP 原样，只增加独立辅助脚本：
 
 ```text
-fixes/zygisk-next/service.sh
+fixes/service.d/m1721-zygisk-zygote-check.sh
 ```
 
 关键逻辑：
 
 ```sh
-if "$MODDIR/bin/zygiskd" status 2>/dev/null |
+if "$MOD/bin/zygiskd" status 2>/dev/null |
     grep -q '^zygote_states:0$'; then
   setprop ctl.restart zygote
   exit 0
 fi
 ```
 
-安装或更新 Zygisk Next 后执行：
+安装官方 Zygisk Next 后执行：
 
 ```bash
-adb push fixes/zygisk-next/service.sh /data/local/tmp/zygisk-next-service.sh
+adb push fixes/service.d/m1721-zygisk-zygote-check.sh \
+  /data/local/tmp/m1721-zygisk-zygote-check.sh
 adb shell "su -c '
-MOD=/data/adb/modules/zygisksu
-cp -a \"\$MOD/service.sh\" \"\$MOD/service.sh.orig-m1721\"
-cp /data/local/tmp/zygisk-next-service.sh \"\$MOD/service.sh\"
-chmod 755 \"\$MOD/service.sh\"
+mkdir -p /data/adb/service.d
+cp /data/local/tmp/m1721-zygisk-zygote-check.sh \
+  /data/adb/service.d/m1721-zygisk-zygote-check.sh
+chmod 755 /data/adb/service.d/m1721-zygisk-zygote-check.sh
 '"
 ```
 
