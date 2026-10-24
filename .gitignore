@@ -1,0 +1,13 @@
+# Kernel build output
+/android_kernel_meizu_m1721/out/
+
+# Local device images and backups
+/fastboot/
+/backups/
+*.img
+
+# Editor and temporary files
+*~
+*.swp
+*.tmp
+.DS_Store
