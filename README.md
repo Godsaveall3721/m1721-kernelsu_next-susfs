@@ -2,6 +2,10 @@
 Meizu m1721（Linux 4.9.330）上集成 KernelSU-Next SUSFS 的方案。
 适配 gitee.com/curtis-ly/LineageOS-M6Note
 
+后续实机经验见[第 12 节：ROM 属性与应用启动兼容](#rom-metadata-compat)。
+该节记录用户空间属性调整，与第 1～11 节的内核集成和框架接入分开验证，
+无需为这个问题重新编译或刷入内核。
+
 
 ## 1. 测试环境
 
@@ -1509,3 +1513,187 @@ com.android.shell/org.matrix.vector.manager.ui.MainActivity
 
 若仍失败，先检查 `dmesg` 中是否还有新的 `execmem` 或
 `manager.apk` SELinux 拒绝，再检查 `vectord` 是否运行。
+
+<a id="rom-metadata-compat"></a>
+
+## 12. 实机经验：ROM 属性与应用启动兼容
+
+### 12.1 先明确：这次修复了什么
+
+2026-10-27 在以下环境中，步道乐跑启动后输出
+`UniverseSecNo2: [hit] No2`，随后自行结束进程：
+
+| 项目 | 本次实测环境 |
+| --- | --- |
+| 手机 | Meizu M6 Note / m1721 |
+| 系统 | Android 11 / LineageOS 18.1 |
+| 原安装内核 | `4.9.330-g38d4f18dec05-dirty #25` |
+| root / SUSFS | KernelSU Next 33004 / SUSFS 1.5.5 |
+| 应用 | 官方步道乐跑 `com.lptiyu.tanke`，4.3.1 / versionCode 231，arm64-v8a |
+| 最终验证范围 | 普通启动进入隐私说明页，普通重启后仍能启动 |
+
+最终有效改动是清除四项 ROM 属性中的 `UNOFFICIAL` 标记。
+这次成功没有更换最终运行的内核，原 boot 分区的校验值也保持一致。
+诊断期间曾临时启动诊断内核，但最终修复与重启验证使用原安装内核。
+
+`No2` 是保护组件的汇总结果，同一个编号可能由不同条件触发。
+本节只记录本机已经验证的条件，不把它定义为所有设备上的固定错误，
+也不承诺这一调整能通过所有 root、ROM 或完整性检查。
+
+### 12.2 为什么四项需要一起核对
+
+本次观察到保护组件读取 ROM 配置并进行字符串匹配。
+只去掉第一项属性里的标记后，该项检查通过，但后面的属性仍然命中；
+同时调整四项后，这部分配置检查才通过。
+
+| 属性 | 本机调整前 | 本机调整后 |
+| --- | --- | --- |
+| `ro.lineage.display.version` | `18.1-20230910-UNOFFICIAL-m1721` | `18.1-20230910-m1721` |
+| `ro.lineage.releasetype` | `UNOFFICIAL` | 空值 |
+| `ro.lineage.version` | `18.1-20230910-UNOFFICIAL-m1721` | `18.1-20230910-m1721` |
+| `ro.modversion` | `18.1-20230910-UNOFFICIAL-m1721` | `18.1-20230910-m1721` |
+
+表中的版本号用于解释本机结果，其他 ROM 不要照抄这些值。
+配套脚本读取设备当前值，仅在包含 `UNOFFICIAL` 时移除该标记，
+保留版本和机型部分，不替换成 `OFFICIAL`，也不新增原本不存在的属性。
+
+这改变的是系统全局可见的元数据，其他读取这些属性的程序也会看到调整值；
+它不会把非官方 ROM 变成官方 ROM，也不会改变应用签名或内核实现。
+
+### 12.3 第一步：确认症状并保存基线
+
+电脑安装 Android platform-tools，在本仓库根目录打开终端。
+以下命令逐行执行，适用于 PowerShell 或常见 Linux/macOS shell。
+如果同时连接多个设备，每条 `adb` 命令都加上对应的 `-s` 参数。
+
+```bash
+adb devices
+adb shell "su -c id"
+adb shell getprop ro.lineage.display.version
+adb shell getprop ro.lineage.releasetype
+adb shell getprop ro.lineage.version
+adb shell getprop ro.modversion
+adb shell "su -c 'getprop ro.lineage.display.version; getprop ro.lineage.releasetype; getprop ro.lineage.version; getprop ro.modversion'" > rom-metadata-before.txt
+```
+
+先确认 root 返回 `uid=0`，再看四项是否包含 `UNOFFICIAL`。
+如果都没有这个标记，本节没有对应的已验证触发条件，先继续定位原因。
+
+重新打开应用后只查看相关日志：
+
+```bash
+adb shell am force-stop com.lptiyu.tanke
+adb shell am start -n com.lptiyu.tanke/com.lptiyu.tanke.activities.splash.SplashActivity
+adb logcat -d -v threadtime -s UniverseSecNo2:V
+```
+
+核对刚刚启动的时间和 PID，避免把旧日志当作新失败。
+仅看到相同编号不足以证明原因相同；接下来的临时对照才用于判断是否适用。
+
+### 12.4 第二步：只做临时对照
+
+使用本次实机验证过的脚本：
+
+```text
+fixes/service.d/98-lepao-rom-metadata.sh
+```
+
+脚本依赖 KernelSU 自带的 `/data/adb/ksu/bin/resetprop`。
+先核对文件可执行，再推送并运行一次：
+
+```bash
+adb shell "su -c 'test -x /data/adb/ksu/bin/resetprop && echo RESET_PROP_READY'"
+adb push fixes/service.d/98-lepao-rom-metadata.sh /data/local/tmp/98-lepao-rom-metadata.sh
+adb shell "su -c 'sh /data/local/tmp/98-lepao-rom-metadata.sh'"
+adb shell getprop ro.lineage.display.version
+adb shell getprop ro.lineage.releasetype
+adb shell getprop ro.lineage.version
+adb shell getprop ro.modversion
+```
+
+应看到原有版本号保留、相关标记消失；`ro.lineage.releasetype`
+原值如果只有 `UNOFFICIAL`，输出一行空白是预期结果。
+
+然后重新启动应用：
+
+```bash
+adb shell am force-stop com.lptiyu.tanke
+adb shell am start -n com.lptiyu.tanke/com.lptiyu.tanke.activities.splash.SplashActivity
+```
+
+在手机上解锁并观察至少 30 秒，再检查：
+
+```bash
+adb shell pidof com.lptiyu.tanke
+adb logcat -d -v threadtime -s UniverseSecNo2:V
+```
+
+进程应仍存在，没有对应本次启动的新 No2，且实际界面能显示。
+只看到 PID 不能证明应用界面正常；息屏截图也不能用来判断应用黑屏。
+隐私协议、登录和权限由使用者自行选择，本次验证停在隐私说明页。
+
+本步骤使用 `resetprop -n`，只调整运行时属性，不写入 ROM 分区。
+如果没有改善，先执行 `adb reboot`，重启并解锁后核对基线；
+不要继续安装开机脚本。本次实测不需要关闭 root、框架或 USB 调试。
+
+### 12.5 第三步：临时验证成功后再设置开机执行
+
+只有上一节实际有效时再安装。以下命令拒绝覆盖同名文件；
+若设备已有该脚本，先检查其内容与来源。
+
+```bash
+adb shell "su -c 'mkdir -p /data/adb/service.d'"
+adb shell "su -c 'test ! -e /data/adb/service.d/98-lepao-rom-metadata.sh && cp /data/local/tmp/98-lepao-rom-metadata.sh /data/adb/service.d/98-lepao-rom-metadata.sh && chmod 700 /data/adb/service.d/98-lepao-rom-metadata.sh'"
+adb shell "su -c 'ls -l /data/adb/service.d/98-lepao-rom-metadata.sh'"
+adb reboot
+```
+
+等待 Android 启动完成并解锁，再核对：
+
+```bash
+adb shell getprop sys.boot_completed
+adb shell "su -c id"
+adb shell uname -a
+adb shell getprop ro.lineage.display.version
+adb shell getprop ro.lineage.releasetype
+adb shell getprop ro.lineage.version
+adb shell getprop ro.modversion
+adb shell settings get global adb_enabled
+adb shell settings get global development_settings_enabled
+```
+
+`sys.boot_completed` 应为 `1`，root 仍可用，属性调整应自动生效。
+如果原先启用了 USB 调试和开发者选项，最后两项也应仍为 `1`。
+再次按 12.4 节普通启动应用，检查真实界面和本次日志。
+
+本机重启后这些检查均通过；应用同一进程继续存活超过 15 分钟，
+没有新增 No2。原内核、root、Vector/Zygisk、原有模块和应用数据保留。
+这里证明的是启动问题已改善，没有验证登录或运动功能全部可用。
+
+### 12.6 回滚：移出开机目录，再普通重启
+
+不要把别人的原始属性值写到自己的 ROM。
+本方案未修改系统分区属性文件，移除开机入口后普通重启即可恢复 ROM 提供的值。
+
+```bash
+adb shell "su -c 'mkdir -p /data/adb/rom-metadata-rollback && test ! -e /data/adb/rom-metadata-rollback/98-lepao-rom-metadata.sh && mv /data/adb/service.d/98-lepao-rom-metadata.sh /data/adb/rom-metadata-rollback/98-lepao-rom-metadata.sh'"
+adb reboot
+```
+
+重启后再次读取四项，与 `rom-metadata-before.txt` 对照。
+把脚本移到 `service.d` 目录之外，避免仅改扩展名后仍被启动器执行。
+如果回滚目录已有同名文件，上述命令会停止覆盖，先核对已有备份。
+只做过临时对照、没有安装开机入口时，直接普通重启即可。
+
+### 12.7 排查经验：把不同问题分开验证
+
+| 现象 | 本次得到的经验 |
+| --- | --- |
+| No2 后退出 | 保护组件可能汇总多个条件；本机确证的一项是 ROM 配置包含 `UNOFFICIAL`，不能只凭编号判断 root 或内核有错。 |
+| 只改一个属性仍失败 | 多个配置可能分别触发同一退出结果；观察到第一项通过，不代表后面也通过。 |
+| Vector 模块启用但 daemon 没运行 | 另行检查工作目录、`ANDROID_ROOT`/`ANDROID_DATA`、`BOOTCLASSPATH`、`DEX2OATBOOTCLASSPATH` 和 disable/remove 标记。本机另修过这些启动问题，但修完当时仍有 No2。 |
+| USB 调试在重启后消失 | 核对模块是否主动写入 USB 模式、`adb_enabled` 或 `development_settings_enabled`。本机另修过相关脚本，不能用关闭调试来代替定位 No2。 |
+| 最后能进入隐私页 | 这是启动验证边界，不等于已经同意协议、登录、跑步成功或所有环境检查都已排除。 |
+
+如果其他设备不符合本节条件，保留其基线，围绕实际失败点重新排查。
+应用或 ROM 更新后也应重新做临时对照，不把这次经验当作跨版本的固定结论。
